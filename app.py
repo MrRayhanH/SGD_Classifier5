@@ -1,15 +1,11 @@
 """
 ============================================================
  EmojiMatch API — Flask Backend for Render Deployment
- Compatible with ALL 5 trained models:
-   emoji_tfidf_mnb.joblib  (Model 1 - Multinomial NB)
-   emoji_tfidf_cnb.joblib  (Model 2 - Complement NB)
-   emoji_tfidf_svc.joblib  (Model 3 - Linear SVC)
-   emoji_tfidf_sgd.joblib  (Model 4 - SGD ★ Recommended)
-   emoji_tfidf_lr.joblib   (Model 5 - Logistic Regression)
+ Compatible with ALL 5 trained models.
 
- Upload whichever .joblib you trained on Kaggle. SGD_Classifier5
- Also upload cat_emoji_map.json alongside it.
+ Notification format sent to ALL users:
+   Title : {emoji} {course title}   →  "📚 Intro to ML"
+   Body  : {subtitle}               →  "Week 1 material uploaded"
 ============================================================
 """
 from flask import Flask, request, jsonify
@@ -24,13 +20,12 @@ app = Flask(__name__)
 # ── ML Model ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Auto-detect which model file is present (tries SGD first as recommended)
 MODEL_FILENAMES = [
-    "emoji_tfidf_sgd.joblib",   # Model 4 — SGD (★ recommended)
-    "emoji_tfidf_lr.joblib",    # Model 5 — Logistic Regression
-    "emoji_tfidf_svc.joblib",   # Model 3 — Linear SVC
-    "emoji_tfidf_mnb.joblib",   # Model 1 — Multinomial NB
-    "emoji_tfidf_cnb.joblib",   # Model 2 — Complement NB
+    "emoji_tfidf_sgd.joblib",
+    "emoji_tfidf_lr.joblib",
+    "emoji_tfidf_svc.joblib",
+    "emoji_tfidf_mnb.joblib",
+    "emoji_tfidf_cnb.joblib",
 ]
 
 model      = None
@@ -45,12 +40,10 @@ for fname in MODEL_FILENAMES:
         break
 
 if model is None:
-    raise FileNotFoundError(
-        "No model .joblib found! Upload one of: " + ", ".join(MODEL_FILENAMES)
-    )
+    raise FileNotFoundError("No model .joblib found! Upload one of: " + ", ".join(MODEL_FILENAMES))
 
 # ── Emoji Map ─────────────────────────────────────────────────────────────────
-EMOJI_FILE = os.path.join(BASE_DIR, "cat_emoji_map.json")
+EMOJI_FILE    = os.path.join(BASE_DIR, "cat_emoji_map.json")
 CAT_EMOJI_MAP = {}
 
 if os.path.exists(EMOJI_FILE):
@@ -58,7 +51,6 @@ if os.path.exists(EMOJI_FILE):
         CAT_EMOJI_MAP = json.load(f)
     print(f"✅ Loaded emoji map: {len(CAT_EMOJI_MAP)} categories")
 else:
-    # Fallback hard-coded map if file is missing
     CAT_EMOJI_MAP = {
         "Assignment Status":    ["😊", "😀", "🎉"],
         "Performance Feedback": ["💪", "🙌", "🥳"],
@@ -73,9 +65,10 @@ else:
         "Security Alert":       ["⚠️", "🔒", "❗"],
         "Feedback Reminder":    ["⏳", "🙂", "😅"],
     }
-    print("⚠️ cat_emoji_map.json not found — using fallback emoji map")
+    print("⚠️ cat_emoji_map.json not found — using built-in fallback")
 
-# ── Firebase: lazy init ───────────────────────────────────────────────────────
+
+# ── Firebase lazy init ────────────────────────────────────────────────────────
 def init_firebase():
     if firebase_admin._apps:
         return
@@ -83,7 +76,7 @@ def init_firebase():
     if not firebase_key_json:
         raise RuntimeError(
             "FIREBASE_KEY_JSON is not set. "
-            "Go to Render Dashboard → Environment → Add Variable."
+            "Render Dashboard → Environment → Add Variable."
         )
     key_dict = json.loads(firebase_key_json)
     cred     = credentials.Certificate(key_dict)
@@ -97,9 +90,9 @@ def init_firebase():
 @app.get("/")
 def root():
     return jsonify({
-        "status":  "ok",
-        "service": "emoji-notification-api",
-        "model":   MODEL_NAME,
+        "status":     "ok",
+        "service":    "emoji-notification-api",
+        "model":      MODEL_NAME,
         "categories": list(CAT_EMOJI_MAP.keys()),
     }), 200
 
@@ -112,22 +105,15 @@ def health():
 @app.post("/predict")
 def predict():
     """
-    Input (JSON or form):
-        { "title": "Your assignment is due tomorrow" }
-        or  { "text": "..." }
-
-    Response:
-        {
-            "label":       "Assignment Reminder",
-            "emoji":       "🚨",
-            "top3_emojis": ["🚨", "🔔", "⏰"],
-            "confidence":  0.94
-        }
+    Input:  { "title": "Your assignment is due tomorrow" }
+    Output: { "label": "Assignment Reminder", "emoji": "🚨",
+              "top3_emojis": ["🚨","🔔","⏰"], "confidence": 0.94,
+              "notif_title": "🚨 Your assignment is due tomorrow" }
     """
     data = request.get_json(silent=True) or {}
     text = (
         request.form.get("title")
-        or request.form.get("tittle")      # keep backward-compat typo
+        or request.form.get("tittle")
         or data.get("title")
         or data.get("tittle")
         or data.get("text")
@@ -137,25 +123,21 @@ def predict():
     if not text:
         return jsonify({"error": "Provide 'title' or 'text' field"}), 400
 
-    # Predict category
-    label = model.predict([text])[0]
+    label     = model.predict([text])[0]
+    emojis    = CAT_EMOJI_MAP.get(label, ["📌", "📢", "🔔"])
+    top_emoji = emojis[0]
 
-    # Confidence (available for SGD, LR, SVC-calibrated, NB models)
     confidence = None
     try:
-        proba      = model.predict_proba([text])
-        confidence = round(float(proba.max()), 4)
+        confidence = round(float(model.predict_proba([text]).max()), 4)
     except Exception:
-        pass  # LinearSVC without calibration won't have proba
-
-    # Get emojis for this category
-    emojis     = CAT_EMOJI_MAP.get(label, ["📌", "📢", "🔔"])
-    top_emoji  = emojis[0]
+        pass
 
     response = {
         "label":       label,
         "emoji":       top_emoji,
         "top3_emojis": emojis,
+        "notif_title": f"{top_emoji} {text}",
     }
     if confidence is not None:
         response["confidence"] = confidence
@@ -163,80 +145,47 @@ def predict():
     return jsonify(response), 200
 
 
-@app.post("/predict-batch")
-def predict_batch():
-    """
-    Input: { "texts": ["sentence 1", "sentence 2", ...] }
-    Response: list of predictions, one per text
-    Useful for predicting multiple notifications at once.
-    """
-    data  = request.get_json(silent=True) or {}
-    texts = data.get("texts", [])
-
-    if not texts or not isinstance(texts, list):
-        return jsonify({"error": "Provide 'texts' as a JSON array"}), 400
-
-    if len(texts) > 50:
-        return jsonify({"error": "Max 50 texts per batch"}), 400
-
-    results = []
-    labels  = model.predict(texts)
-
-    try:
-        probas = model.predict_proba(texts).max(axis=1)
-    except Exception:
-        probas = [None] * len(texts)
-
-    for i, (text, label) in enumerate(zip(texts, labels)):
-        emojis = CAT_EMOJI_MAP.get(label, ["📌", "📢", "🔔"])
-        entry  = {
-            "text":        text,
-            "label":       label,
-            "emoji":       emojis[0],
-            "top3_emojis": emojis,
-        }
-        if probas[i] is not None:
-            entry["confidence"] = round(float(probas[i]), 4)
-        results.append(entry)
-
-    return jsonify({"predictions": results, "count": len(results)}), 200
-
-
 @app.post("/send-notification")
 def send_notification():
     """
-    Called by Android InsertCourseActivity after a new course is saved.
-    Automatically predicts emoji from course title.
-    Sends FCM push to ALL devices subscribed to topic 'all_users'.
+    Called by Android after saving a course to Firebase.
+    Predicts emoji from title → sends FCM to topic "all_users".
 
-    Input:
-        {
-            "courseId":       "abc123",
-            "title":          "Introduction to Machine Learning",
-            "subtitle":       "Week 1 material uploaded",
-            "imageUrl":       "https://...",
-            "pdfLink":        "https://...",
-            "predictedClass": "Study Material"   ← optional, auto-predicted if missing
-        }
+    Notification shown on EVERY subscribed device:
+      ┌─────────────────────────────────┐
+      │  📚 Introduction to ML          │  ← emoji + title
+      │  Week 1 material uploaded       │  ← subtitle
+      └─────────────────────────────────┘
+
+    Input JSON:
+      {
+        "courseId":  "abc123",
+        "title":     "Introduction to Machine Learning",
+        "subtitle":  "Week 1 material uploaded",
+        "imageUrl":  "https://...",
+        "pdfLink":   "https://...",
+        "predictedClass": "Study Material"   (optional)
+      }
     """
     try:
         init_firebase()
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
     except Exception as e:
-        return jsonify({"error": "Firebase init failed: " + str(e)}), 500
+        return jsonify({"error": f"Firebase init failed: {e}"}), 500
 
     data = request.get_json(silent=True)
     if not data:
-        return jsonify({"error": "No JSON data provided"}), 400
+        return jsonify({"error": "No JSON body received"}), 400
 
-    course_id    = str(data.get("courseId",  ""))
-    title        = str(data.get("title",     "New Course Added"))
-    subtitle     = str(data.get("subtitle",  ""))
-    image_url    = str(data.get("imageUrl",  ""))
-    pdf_link     = str(data.get("pdfLink",   ""))
+    # ── Read fields ───────────────────────────────────────────
+    course_id = str(data.get("courseId",  ""))
+    title     = str(data.get("title",     "New Course Added")).strip()
+    subtitle  = str(data.get("subtitle",  "")).strip()
+    image_url = str(data.get("imageUrl",  ""))
+    pdf_link  = str(data.get("pdfLink",   ""))
 
-    # Auto-predict category + emoji if not provided
+    # ── Predict emoji from title ──────────────────────────────
     predicted_class = str(data.get("predictedClass", "")).strip()
     predicted_emoji = str(data.get("predictedEmoji", "")).strip()
 
@@ -244,14 +193,20 @@ def send_notification():
         predicted_class = model.predict([title])[0]
 
     if not predicted_emoji and predicted_class:
-        emojis          = CAT_EMOJI_MAP.get(predicted_class, ["📌"])
-        predicted_emoji = emojis[0]
+        predicted_emoji = CAT_EMOJI_MAP.get(predicted_class, ["📌"])[0]
 
-    # Build FCM message
-    notification_title = f"{predicted_emoji} New Course Added!"
-    notification_body  = title if title else "Check the latest update"
+    # ── Notification strings ──────────────────────────────────
+    #    Title → emoji + course title    "📚 Introduction to ML"
+    #    Body  → subtitle                "Week 1 material uploaded"
+    notif_title = f"{predicted_emoji} {title}"
+    notif_body  = subtitle if subtitle else title
 
+    print(f"📤 Sending FCM → all_users | '{notif_title}' | '{notif_body}'")
+
+    # ── FCM message ───────────────────────────────────────────
     message = messaging.Message(
+
+        # data payload — readable in onMessageReceived() in Android
         data={
             "courseId":       course_id,
             "title":          title,
@@ -261,29 +216,38 @@ def send_notification():
             "predictedClass": predicted_class,
             "predictedEmoji": predicted_emoji,
         },
+
+        # notification payload — OS renders this in the system tray
         notification=messaging.Notification(
-            title=notification_title,
-            body=notification_body,
+            title=notif_title,   # "📚 Introduction to ML"
+            body=notif_body,     # "Week 1 material uploaded"
         ),
+
         android=messaging.AndroidConfig(
             priority="high",
             notification=messaging.AndroidNotification(
                 sound="default",
                 channel_id="course_add_channel",
+                priority="high",
             ),
         ),
+
+        # ✅ ALL devices subscribed to "all_users" receive this
         topic="all_users",
     )
 
     try:
-        response = messaging.send(message)
-        print(f"✅ FCM sent: {response} | emoji={predicted_emoji} | class={predicted_class}")
+        fcm_response = messaging.send(message)
+        print(f"✅ FCM sent: {fcm_response}")
         return jsonify({
             "success":        True,
-            "fcm_id":         response,
+            "fcm_id":         fcm_response,
+            "notif_title":    notif_title,
+            "notif_body":     notif_body,
             "predictedClass": predicted_class,
             "predictedEmoji": predicted_emoji,
         }), 200
+
     except Exception as e:
         print(f"❌ FCM error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -291,7 +255,6 @@ def send_notification():
 
 @app.get("/emoji-map")
 def emoji_map():
-    """Returns the full category → emoji mapping. Useful for Android app reference."""
     return jsonify(CAT_EMOJI_MAP), 200
 
 
